@@ -5,3 +5,5 @@ extracted/
 failed/
 logs/
 *.log
+# Inputs locales
+links.txt

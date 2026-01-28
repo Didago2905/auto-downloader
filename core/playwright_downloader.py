@@ -6,7 +6,7 @@ def descargar_con_playwright(url, carpeta_destino="downloads"):
     carpeta.mkdir(exist_ok=True)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=False)
         context = browser.new_context(accept_downloads=True)
         page = context.new_page()
 
