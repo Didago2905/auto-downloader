@@ -1,5 +1,7 @@
 from pathlib import Path
 from playwright.sync_api import sync_playwright
+import time
+import os
 
 from core.batch import leer_links
 from core.downloader import descargar_archivo
@@ -12,25 +14,29 @@ from core.extractor import (
 )
 from core.converter import convertir_mkv_a_mp4
 from core.renamer import renombrar_video
-
+from core.config import (
+    LIBRARY_PATH,
+    SERIES_NAME,
+    SEASON_NUMBER,
+    RAR_PASSWORD,
+    CONVERT_TO_MP4,
+    DELETE_MKV,
+)
 
 # ==========================
-# CONFIGURACIÓN
+# LOGS
 # ==========================
 
-PASSWORD = "hackstore.ac"
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
 
-CONVERTIR_A_MP4 = True
-BORRAR_MKV_ORIGINAL = True
-
-RUTA_SERIES = Path(r"D:\Media\Series")
-NOMBRE_SERIE = "The Big Bang Theory"
-TEMPORADA_ACTUAL = 1
-
-DESTINO_FINAL = RUTA_SERIES / NOMBRE_SERIE / f"Season {TEMPORADA_ACTUAL:02d}"
-
+LOG_PATH = LOG_DIR / "autodownloader.log"
+LOG_RENAME = LOG_DIR / "rename.log"
 FAILED_FILE = Path("failed/failed_links.txt")
-LOG_RENAME = Path("logs/rename.log")
+
+TOTAL_ORIGINAL_BYTES = 0
+TOTAL_CONVERTED_BYTES = 0
+PROCESS_START_TIME = None
 
 
 # ==========================
@@ -38,11 +44,44 @@ LOG_RENAME = Path("logs/rename.log")
 # ==========================
 
 
+def start_global_timer():
+    global PROCESS_START_TIME
+    PROCESS_START_TIME = time.time()
+
+
+def log_file_sizes(original_path=None, converted_path=None):
+    global TOTAL_ORIGINAL_BYTES, TOTAL_CONVERTED_BYTES
+
+    with open(LOG_PATH, "a", encoding="utf-8") as log:
+        if original_path and os.path.exists(original_path):
+            size = os.path.getsize(original_path)
+            TOTAL_ORIGINAL_BYTES += size
+            log.write(f"[ORIGINAL] {original_path} | {size / (1024**2):.2f} MB\n")
+
+        if converted_path and os.path.exists(converted_path):
+            size = os.path.getsize(converted_path)
+            TOTAL_CONVERTED_BYTES += size
+            log.write(f"[MP4] {converted_path} | {size / (1024**2):.2f} MB\n")
+
+
+def close_global_log():
+    if PROCESS_START_TIME is None:
+        return
+
+    total_time = time.time() - PROCESS_START_TIME
+
+    with open(LOG_PATH, "a", encoding="utf-8") as log:
+        log.write("\n===== RESUMEN FINAL =====\n")
+        log.write(f"Tamaño original: {TOTAL_ORIGINAL_BYTES / (1024**3):.2f} GB\n")
+        log.write(f"Tamaño MP4: {TOTAL_CONVERTED_BYTES / (1024**3):.2f} GB\n")
+        log.write(f"Tiempo total: {total_time / 60:.2f} min\n")
+        log.write("=========================\n\n")
+
+
 def descargar_rar_seguro(link_real):
     try:
         return descargar_archivo(link_real)
     except Exception:
-        print("Descarga con requests falló, usando Playwright...")
         return descargar_con_playwright(link_real)
 
 
@@ -64,76 +103,53 @@ def obtener_link_real_desde_mediafire(url):
 if __name__ == "__main__":
     links = leer_links("links.txt")
 
-    for i, url in enumerate(links, start=1):
-        print(f"\n=== Procesando {i}/{len(links)} ===")
-        print(url)
+    DESTINO_FINAL = LIBRARY_PATH / SERIES_NAME / f"Season {SEASON_NUMBER:02d}"
 
+    if links:
+        start_global_timer()
+
+    for url in links:
         try:
-            # 1. Link real
             link_real = obtener_link_real_desde_mediafire(url)
-
-            # 2. Descargar RAR
             ruta_rar = descargar_rar_seguro(link_real)
 
-            # 3. Extraer
-            extraer_rar(ruta_rar, password=PASSWORD)
+            extraer_rar(ruta_rar, password=RAR_PASSWORD)
 
-            # 4. Buscar videos
             videos = filtrar_videos("extracted")
-
             if not videos:
-                print("⚠️ No se encontraron videos")
                 continue
 
-            print("🎬 Videos encontrados:")
-            for v in videos:
-                print(" -", v.name)
+            # Conversión
+            if CONVERT_TO_MP4:
+                nuevos = []
+                for v in videos:
+                    if v.suffix.lower() == ".mkv":
+                        log_file_sizes(original_path=v)
+                        mp4 = convertir_mkv_a_mp4(v, borrar_mkv=DELETE_MKV)
+                        log_file_sizes(converted_path=mp4)
+                        nuevos.append(mp4)
+                if nuevos:
+                    videos = nuevos
 
-            # 5. Convertir MKV → MP4
-            if CONVERTIR_A_MP4:
-                mp4_generados = []
-
-                for video in videos:
-                    if video.suffix.lower() == ".mkv":
-                        mp4 = convertir_mkv_a_mp4(video, borrar_mkv=BORRAR_MKV_ORIGINAL)
-                        mp4_generados.append(mp4)
-
-                if mp4_generados:
-                    videos = mp4_generados
-
-            # 6. Mover a destino final
             movidos = mover_videos(videos, DESTINO_FINAL)
 
-            # 7. Renombrar
-            finales = []
             for v in movidos:
-                nuevo = renombrar_video(
-                    ruta_video=v, nombre_serie=NOMBRE_SERIE, log_path=LOG_RENAME
+                renombrar_video(
+                    ruta_video=v,
+                    nombre_serie=SERIES_NAME,
+                    log_path=LOG_RENAME,
                 )
-                finales.append(nuevo)
 
-            # 8. Limpiar temporales
             limpiar_extracted_completo("extracted")
 
-            # 9. Borrar RAR
             if ruta_rar.exists():
                 ruta_rar.unlink()
-                print(f"🧹 RAR eliminado: {ruta_rar.name}")
 
-            print("🎯 Videos finales listos para streaming:")
-            for v in finales:
-                print(" -", v.name)
-
-        except Exception as e:
-            print("❌ Error con este link:", e)
+        except Exception:
             FAILED_FILE.parent.mkdir(exist_ok=True)
             FAILED_FILE.write_text(
-                (
-                    FAILED_FILE.read_text(encoding="utf-8")
-                    if FAILED_FILE.exists()
-                    else ""
-                )
-                + url
-                + "\n",
+                (FAILED_FILE.read_text() if FAILED_FILE.exists() else "") + url + "\n",
                 encoding="utf-8",
             )
+
+    close_global_log()
