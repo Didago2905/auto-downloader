@@ -2,36 +2,45 @@ from pathlib import Path
 from typing import List, Optional
 import re
 
-# ==========================
-# CONFIGURACIÓN
-# ==========================
-
 SUPPORTED_EXTENSIONS = {".mp4"}
+
 
 # ==========================
 # HELPERS
 # ==========================
 
 
+def extraer_numero_episodio(nombre: str) -> Optional[int]:
+    patterns = [
+        r"[sS]\d{1,2}[\s\-_.]*[eE](\d{1,3})",
+        r"\b(\d{1,2})x(\d{1,3})\b",
+        r"[eE](\d{1,3})",
+    ]
+
+    for p in patterns:
+        match = re.search(p, nombre)
+        if match:
+            return int(match.groups()[-1])
+
+    return None
+
+
 def listar_videos(carpeta: Path) -> List[Path]:
-    """
-    Devuelve una lista de archivos de video ordenados de forma HUMANA
-    usando números tipo 1.1, 1.10, 1.2, etc.
-    """
     if not carpeta.exists() or not carpeta.is_dir():
         return []
 
-    videos = [
-        f
-        for f in carpeta.iterdir()
-        if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS
-    ]
+    def sort_key(f: Path):
+        ep = extraer_numero_episodio(f.stem)
+        return (ep is None, ep if ep is not None else 0, f.name.lower())
 
-    def clave_orden(video: Path):
-        orden = extraer_numero_orden(video.stem)
-        return (orden is None, orden)
-
-    return sorted(videos, key=clave_orden)
+    return sorted(
+        [
+            f
+            for f in carpeta.rglob("*")
+            if f.is_file() and f.name.lower().endswith(".mp4")
+        ],
+        key=sort_key,
+    )
 
 
 def construir_nombre(
@@ -43,31 +52,10 @@ def construir_nombre(
     return f"{nombre_serie}.S{temporada:02d}E{episodio:02d}{extension}"
 
 
-def escribir_log(log_path: Path, original: str, nuevo: str):
+def escribir_log(log_path: Path, original: str, nuevo: str, mode: str):
     log_path.parent.mkdir(exist_ok=True)
     with open(log_path, "a", encoding="utf-8") as log:
-        log.write(f"{original} → {nuevo}\n")
-
-
-def extraer_numero_episodio(nombre: str) -> Optional[int]:
-    """
-    Intenta extraer número de episodio explícito (S01E02, E03, etc.)
-    """
-    match = re.search(r"[eE](\d{1,3})", nombre)
-    if match:
-        return int(match.group(1))
-    return None
-
-
-def extraer_numero_orden(nombre: str) -> Optional[tuple[int, int]]:
-    """
-    Extrae números tipo:
-    G4T0 1.10 -> (1, 10)
-    """
-    match = re.search(r"\b(\d+)\.(\d+)\b", nombre)
-    if not match:
-        return None
-    return int(match.group(1)), int(match.group(2))
+        log.write(f"[{mode}] {original} → {nuevo}\n")
 
 
 def pedir_confirmacion(auto_confirm: bool) -> bool:
@@ -77,34 +65,10 @@ def pedir_confirmacion(auto_confirm: bool) -> bool:
     return resp == "y"
 
 
-def preview_renombrado(
-    videos: List[Path],
-    nombre_serie: str,
-    temporada: int,
-    episodio_inicio: int,
-):
-    preview = []
-    ep = episodio_inicio
-    for v in videos:
-        nuevo = construir_nombre(nombre_serie, temporada, ep, v.suffix)
-        preview.append((v.name, nuevo))
-        ep += 1
-    return preview
-
-
-def detectar_temporada_por_orden(videos: List[Path]) -> Optional[int]:
-    temporadas = []
-
-    for v in videos:
-        orden = extraer_numero_orden(v.stem)
-        if orden is None:
-            return None
-        temporadas.append(orden[0])
-
-    if len(set(temporadas)) == 1:
-        return temporadas[0]
-
-    return None
+def preview(videos: List[Path], nuevos_nombres: List[str]):
+    print("\n[PREVIEW]")
+    for v, n in zip(videos, nuevos_nombres):
+        print(f"{v.name} → {n}")
 
 
 # ==========================
@@ -117,9 +81,9 @@ def normalizar_carpeta(
     nombre_serie: str,
     temporada: int,
     episodio_inicio: int = 1,
+    mode: str = "by_order",  # by_order | by_name | interactive
     log_path: Optional[Path] = None,
     dry_run: bool = True,
-    allow_order_fallback: bool = True,
     auto_confirm: bool = False,
 ):
     videos = listar_videos(carpeta)
@@ -128,99 +92,83 @@ def normalizar_carpeta(
         print(f"⚠️ No hay videos para normalizar en: {carpeta}")
         return []
 
-    # Detectar patrones
-    episodios_detectados = [extraer_numero_episodio(v.stem) for v in videos]
-    hay_patron = any(e is not None for e in episodios_detectados)
-
-    temporada_detectada = detectar_temporada_por_orden(videos)
+    nuevos_nombres = []
 
     # ==========================
-    # DETECCIÓN DE TEMPORADA
+    # MODO BY_ORDER (DEFAULT)
     # ==========================
+    if mode == "by_order":
+        episodio = episodio_inicio
+        for v in videos:
+            nuevos_nombres.append(
+                construir_nombre(nombre_serie, temporada, episodio, v.suffix)
+            )
+            episodio += 1
 
-    if temporada_detectada and temporada_detectada != temporada:
-        print(
-            f"⚠️ Se detectó posible temporada en nombres: {temporada_detectada} "
-            f"(configurada: {temporada})"
-        )
-
-        if auto_confirm:
-            temporada = temporada_detectada
-        else:
-            resp = (
-                input(
-                    f"¿Usar temporada {temporada_detectada} en lugar de {temporada}? (y/N): "
+    # ==========================
+    # MODO BY_NAME
+    # ==========================
+    elif mode == "by_name":
+        for v in videos:
+            ep = extraer_numero_episodio(v.stem)
+            if ep is None:
+                raise ValueError(
+                    f"No se pudo extraer episodio desde el nombre: {v.name}"
                 )
-                .strip()
-                .lower()
+            nuevos_nombres.append(
+                construir_nombre(nombre_serie, temporada, ep, v.suffix)
             )
 
-            if resp == "y":
-                temporada = temporada_detectada
-
     # ==========================
-    # FALLBACK POR ORDEN
+    # MODO INTERACTIVE
     # ==========================
+    elif mode == "interactive":
+        episodio = episodio_inicio
+        for v in videos:
+            nuevos_nombres.append(
+                construir_nombre(nombre_serie, temporada, episodio, v.suffix)
+            )
+            episodio += 1
 
-    if not hay_patron and allow_order_fallback:
-        print("⚠️ No se detectó patrón fiable en los nombres.")
-        print("➡️ Se propone renombrar por ORDEN.")
-        print(f"📁 Archivos detectados: {len(videos)}")
-
-        preview = preview_renombrado(
-            videos,
-            nombre_serie,
-            temporada,
-            episodio_inicio,
-        )
-
-        print("\n[PREVIEW]")
-        for original, nuevo in preview:
-            print(f"{original} → {nuevo}")
+        preview(videos, nuevos_nombres)
 
         if dry_run:
             print("\n🧪 DRY-RUN activo.")
-
             if not pedir_confirmacion(auto_confirm):
                 print("⛔ Operación cancelada.")
                 return []
-
             dry_run = False
+
+    else:
+        raise ValueError(f"Modo desconocido: {mode}")
 
     # ==========================
     # RENOMBRADO REAL
     # ==========================
+    if dry_run:
+        preview(videos, nuevos_nombres)
+        return []
 
     print(f"\n🧹 Normalizando {len(videos)} archivos en {carpeta}")
 
-    episodio_actual = episodio_inicio
     renombrados = []
 
-    for video in videos:
-        nuevo_nombre = construir_nombre(
-            nombre_serie,
-            temporada,
-            episodio_actual,
-            video.suffix,
-        )
-        destino = video.with_name(nuevo_nombre)
+    for v, nuevo in zip(videos, nuevos_nombres):
+        destino = v.with_name(nuevo)
 
         if destino.exists():
             print(f"⏭️ Ya existe, se omite: {destino.name}")
-            episodio_actual += 1
             continue
 
         try:
-            video.rename(destino)
+            v.rename(destino)
             renombrados.append(destino)
-            print(f"✏️ {video.name} → {destino.name}")
+            print(f"✏️ {v.name} → {destino.name}")
 
             if log_path:
-                escribir_log(log_path, video.name, destino.name)
+                escribir_log(log_path, v.name, destino.name, mode)
 
         except Exception as e:
-            print(f"❌ Error renombrando {video.name}: {e}")
-
-        episodio_actual += 1
+            print(f"❌ Error renombrando {v.name}: {e}")
 
     return renombrados
